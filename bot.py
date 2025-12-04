@@ -3,6 +3,7 @@ import json
 import asyncio
 import threading
 import logging
+import time
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
@@ -13,17 +14,18 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# --- CONFIGURATION (Load from Environment Variables) ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-# Paste the FULL content of your credentials.json into this Env Variable on Render
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS") 
-# The Folder ID from the URL of your Drive folder
-PARENT_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID") 
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS")
+PARENT_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
+
+# This file must exist in your GitHub Repo
+COOKIES_FILE = "cookies.txt" 
 
 # Global Queue
 download_queue = asyncio.Queue()
 
-# --- 1. KEEP ALIVE SERVER (Flask) ---
+# --- 1. KEEP ALIVE SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -44,6 +46,7 @@ async def upload_to_drive(file_path, file_name):
     print(f"☁️ Uploading {file_name}...")
     try:
         if not GOOGLE_CREDS_JSON:
+            print("❌ No Google Creds found.")
             return None
             
         creds_dict = json.loads(GOOGLE_CREDS_JSON)
@@ -64,84 +67,136 @@ async def upload_to_drive(file_path, file_name):
         print(f"Drive Upload Error: {e}")
         return None
 
-# --- 3. BROWSER & DOWNLOAD LOGIC ---
-def process_video(url):
-    """Sync function to handle Browser + FFmpeg"""
+# --- 3. COOKIE PARSER ---
+def parse_cookies_netscape(path):
+    """Reads cookies.txt from the repo"""
+    cookies = []
+    if not os.path.exists(path):
+        print(f"⚠️ Warning: {path} not found in repository.")
+        return []
+    
+    with open(path, 'r') as f:
+        for line in f:
+            if line.startswith('#') or not line.strip(): continue
+            parts = line.split('\t')
+            if len(parts) >= 7:
+                cookie = {
+                    'domain': parts[0], 'name': parts[5],
+                    'value': parts[6].strip(), 'path': parts[2],
+                    'expiry': int(parts[4]) if parts[4].isdigit() else None
+                }
+                cookies.append(cookie)
+    return cookies
+
+# --- 4. BROWSER & SNIFFER LOGIC ---
+def get_video_stream(url):
+    """Sync function to Sniff Network Logs using Selenium"""
     print(f"🕵️ Analyzing: {url}")
     
-    # Chrome Options for Server
+    # Chrome Options for Render
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    # CRITICAL: Enable Performance Logging (replacing Colab logic)
+    options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
     
     service = Service("/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
     
-    output_filename = "video.mp4"
-    title = "Unknown Video"
+    m3u8_url = None
+    title = "video_download"
     
     try:
+        # 1. Inject Cookies
+        driver.get("https://curiositystream.com/login") # Dummy load to set domain
+        cookies = parse_cookies_netscape(COOKIES_FILE)
+        print(f"🍪 Injecting {len(cookies)} cookies...")
+        for c in cookies:
+            try: driver.add_cookie(c)
+            except: pass
+            
+        # 2. Load Target URL
         driver.get(url)
-        # Note: You need to implement your Login logic here if not using cookies
-        # Or pass cookies via Env Variable if needed for CuriosityStream
+        time.sleep(15) # Wait for network requests
         
-        # MOCK LOGIC for demo (Replace with your actual finding logic)
-        title = driver.title.replace(" ", "_")
-        output_filename = f"{title}.mp4"
+        # 3. Sniff Logs
+        logs = driver.get_log('performance')
+        for entry in logs:
+            message = json.loads(entry['message'])['message']
+            if message['method'] == 'Network.requestWillBeSent':
+                req_url = message['params']['request']['url']
+                if '.m3u8' in req_url or '.mpd' in req_url:
+                    m3u8_url = req_url
+                    # Don't break; get the last one usually
         
-        # Assume we found the stream link (You need your 'get_stream_url' logic here)
-        stream_link = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" # Placeholder
-        
-        print(f"⬇️ Downloading {title}...")
-        # Download using FFmpeg
-        cmd = f'ffmpeg -i "{stream_link}" -c copy "{output_filename}" -y -loglevel error'
-        os.system(cmd)
-        
-        return output_filename, title
+        # 4. Get Title
+        try:
+            raw_title = driver.title.replace('Watch ', '').replace(' | Curiosity Stream', '').strip()
+            # Clean filename
+            title = "".join([c for c in raw_title if c.isalpha() or c.isdigit() or c==' ']).rstrip().replace(" ", "_")
+        except:
+            pass
+
     except Exception as e:
-        print(f"Error: {e}")
-        return None, None
+        print(f"Browser Error: {e}")
     finally:
         driver.quit()
+        
+    return m3u8_url, title
 
-# --- 4. QUEUE WORKER ---
+# --- 5. QUEUE WORKER ---
 async def queue_worker(application):
     print("👷 Worker started...")
     while True:
         url, chat_id = await download_queue.get()
         try:
-            await application.bot.send_message(chat_id, f"🔄 Processing: {url}")
+            await application.bot.send_message(chat_id, f"🔄 **Processing:**\n{url}", parse_mode='Markdown')
             
-            # 1. Download
-            filename, title = await asyncio.to_thread(process_video, url)
+            # 1. Find Stream
+            stream_link, title = await asyncio.to_thread(get_video_stream, url)
             
-            if filename and os.path.exists(filename):
-                # 2. Upload
-                await application.bot.send_message(chat_id, "☁️ Uploading to Drive...")
-                file_id = await upload_to_drive(filename, filename)
-                
-                if file_id:
-                    await application.bot.send_message(chat_id, f"✅ **Success!**\nFile: {title}\nSaved to Drive.", parse_mode='Markdown')
-                else:
-                    await application.bot.send_message(chat_id, "❌ Upload Failed (Check Creds).")
-                
-                # 3. Cleanup
-                os.remove(filename)
+            if not stream_link:
+                await application.bot.send_message(chat_id, "❌ Failed. Could not find stream (Check cookies.txt).")
             else:
-                await application.bot.send_message(chat_id, "❌ Download Failed.")
+                # 2. Download with FFmpeg
+                filename = f"{title}.mp4"
+                # Using the exact FFmpeg flags from your Colab script
+                cmd = f'ffmpeg -user_agent "Mozilla/5.0" -i "{stream_link}" -c copy -bsf:a aac_adtstoasc "{filename}" -y -hide_banner -loglevel error'
+                
+                await application.bot.send_message(chat_id, f"⬇️ Found Stream. Downloading: `{title}`...", parse_mode='Markdown')
+                
+                exit_code = await asyncio.to_thread(os.system, cmd)
+                
+                if exit_code == 0 and os.path.exists(filename):
+                    # 3. Upload to Drive
+                    await application.bot.send_message(chat_id, "☁️ Uploading to Drive...")
+                    file_id = await upload_to_drive(filename, filename)
+                    
+                    if file_id:
+                        await application.bot.send_message(chat_id, f"✅ **Success!**\nFile saved to Drive.", parse_mode='Markdown')
+                    else:
+                        await application.bot.send_message(chat_id, "❌ Upload Failed (Check Creds).")
+                    
+                    # 4. Cleanup (Crucial on Render)
+                    os.remove(filename)
+                else:
+                    await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed.")
                 
         except Exception as e:
             await application.bot.send_message(chat_id, f"Error: {e}")
         finally:
             download_queue.task_done()
 
-# --- 5. TELEGRAM HANDLER ---
+# --- 6. TELEGRAM HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     chat_id = update.effective_chat.id
     
-    # Add to Queue
+    if "curiositystream" not in url:
+         await context.bot.send_message(chat_id, "⚠️ Please send a CuriosityStream link.")
+         return
+
     await download_queue.put((url, chat_id))
     q_pos = download_queue.qsize()
     await context.bot.send_message(chat_id, f"✅ Added to Queue (Position: {q_pos})")
@@ -150,14 +205,12 @@ if __name__ == '__main__':
     # Start Keep Alive
     start_keep_alive()
     
-    # Start Bot
     if not TOKEN:
         print("❌ Error: TELEGRAM_TOKEN missing.")
     else:
         app_bot = ApplicationBuilder().token(TOKEN).build()
-        app_bot.add_handler(MessageHandler(filters.TEXT, handle_message))
+        app_bot.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
         
-        # Start Worker
         loop = asyncio.get_event_loop()
         loop.create_task(queue_worker(app_bot))
         
