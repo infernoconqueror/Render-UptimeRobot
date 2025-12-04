@@ -151,7 +151,7 @@ def get_video_stream(url):
         
     return m3u8_url, title, screenshot_path
 
-# --- 5. QUEUE WORKER ---
+# --- 5. QUEUE WORKER (Updated with Cookies for FFmpeg) ---
 async def queue_worker(application):
     print("👷 Worker started...")
     while True:
@@ -159,6 +159,7 @@ async def queue_worker(application):
         try:
             await application.bot.send_message(chat_id, f"🔄 **Processing:**\n{url}", parse_mode='Markdown')
             
+            # 1. Find Stream
             stream_link, title, debug_img = await asyncio.to_thread(get_video_stream, url)
             
             if not stream_link:
@@ -169,7 +170,20 @@ async def queue_worker(application):
                     os.remove(debug_img)
             else:
                 filename = f"{title}.mp4"
-                cmd = f'ffmpeg -user_agent "Mozilla/5.0" -i "{stream_link}" -c copy -bsf:a aac_adtstoasc "{filename}" -y -hide_banner -loglevel error'
+                
+                # --- CRITICAL FIX: Pass Cookies & UA to FFmpeg ---
+                # We use the same User-Agent as Chrome so the server thinks it's the same person
+                ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+                
+                # The flags '-cookies 1' and '-cookies_file' tell FFmpeg to login using your file
+                cmd = (
+                    f'ffmpeg -user_agent "{ua}" '
+                    f'-cookies 1 -cookies_file "{COOKIES_FILE}" '
+                    f'-i "{stream_link}" '
+                    f'-c copy -bsf:a aac_adtstoasc "{filename}" '
+                    f'-y -hide_banner -loglevel error'
+                )
+                # -------------------------------------------------
                 
                 await application.bot.send_message(chat_id, f"⬇️ Found Stream. Downloading...", parse_mode='Markdown')
                 
@@ -185,12 +199,13 @@ async def queue_worker(application):
                         await application.bot.send_message(chat_id, "❌ Upload Failed (Check Logs).")
                     os.remove(filename)
                 else:
-                    await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed.")
+                    await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed (Access Denied).")
                 
         except Exception as e:
             await application.bot.send_message(chat_id, f"Error: {e}")
         finally:
             download_queue.task_done()
+
 
 # --- 6. MAIN ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
