@@ -151,7 +151,7 @@ def get_video_stream(url):
         
     return m3u8_url, title, screenshot_path
 
-# --- 5. QUEUE WORKER (Updated with Cookies for FFmpeg) ---
+# --- 5. QUEUE WORKER (Fixed for Older FFmpeg) ---
 async def queue_worker(application):
     print("👷 Worker started...")
     while True:
@@ -171,19 +171,29 @@ async def queue_worker(application):
             else:
                 filename = f"{title}.mp4"
                 
-                # --- CRITICAL FIX: Pass Cookies & UA to FFmpeg ---
-                # We use the same User-Agent as Chrome so the server thinks it's the same person
+                # --- FIX: Manually Build Cookie Header ---
+                # We read the file and convert it to a string: "name=value; name2=value2"
+                cookies = parse_cookies_netscape(COOKIES_FILE)
+                cookie_header = ""
+                if cookies:
+                    # Create the formatted string
+                    cookie_list = [f"{c['name']}={c['value']}" for c in cookies]
+                    cookie_str = "; ".join(cookie_list)
+                    # Add to header variable
+                    cookie_header = f"Cookie: {cookie_str}"
+
                 ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
                 
-                # The flags '-cookies 1' and '-cookies_file' tell FFmpeg to login using your file
+                # We pass the cookies via -headers instead of -cookies_file
+                # Note: The \r\n is important for headers in FFmpeg
                 cmd = (
                     f'ffmpeg -user_agent "{ua}" '
-                    f'-cookies 1 -cookies_file "{COOKIES_FILE}" '
+                    f'-headers "{cookie_header}\r\n" '
                     f'-i "{stream_link}" '
                     f'-c copy -bsf:a aac_adtstoasc "{filename}" '
                     f'-y -hide_banner -loglevel error'
                 )
-                # -------------------------------------------------
+                # ----------------------------------------
                 
                 await application.bot.send_message(chat_id, f"⬇️ Found Stream. Downloading...", parse_mode='Markdown')
                 
