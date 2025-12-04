@@ -2,4 +2,7 @@ python-telegram-bot
 selenium
 webdriver-manager
 flask
-threading
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+nest_asyncio
