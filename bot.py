@@ -88,7 +88,7 @@ def parse_cookies_netscape(path):
                 cookies.append(cookie)
     return cookies
 
-# --- 4. BROWSER & SNIFFER LOGIC (Updated) ---
+# --- 4. BROWSER & SNIFFER LOGIC (Updated with Force Play) ---
 def get_video_stream(url):
     """Sync function to Sniff Network Logs using Selenium"""
     print(f"🕵️ Analyzing: {url}")
@@ -97,7 +97,7 @@ def get_video_stream(url):
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # NEW: Add User Agent to look like a real Windows PC
+    # Mask as Windows PC
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
     options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
     
@@ -112,15 +112,28 @@ def get_video_stream(url):
         # 1. Inject Cookies
         driver.get("https://curiositystream.com/login")
         cookies = parse_cookies_netscape(COOKIES_FILE)
-        
-        # Add cookies to driver
         for c in cookies:
             try: driver.add_cookie(c)
             except: pass
             
         # 2. Load Target URL
         driver.get(url)
-        time.sleep(15) # Wait for video to trigger
+        time.sleep(5) # Wait for page load
+        
+        # --- NEW: FORCE VIDEO TO PLAY ---
+        print("▶️ Attempting to force play...")
+        try:
+            # Method A: JavaScript Force Play
+            driver.execute_script("document.querySelector('video').play()")
+        except:
+            # Method B: Click the center of the screen
+            try:
+                driver.find_element("tag name", "body").click()
+            except:
+                pass
+        # --------------------------------
+        
+        time.sleep(10) # Wait for video to start buffering
         
         # 3. Sniff Logs
         logs = driver.get_log('performance')
@@ -150,6 +163,7 @@ def get_video_stream(url):
         driver.quit()
         
     return m3u8_url, title, screenshot_path
+
 
 # --- 5. QUEUE WORKER (Updated) ---
 async def queue_worker(application):
