@@ -20,9 +20,9 @@ PARENT_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 COOKIES_FILE = "cookies.txt"
 
 # --- NEW: OAUTH VARIABLES ---
-CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 
 download_queue = asyncio.Queue()
 
