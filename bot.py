@@ -89,7 +89,7 @@ def parse_cookies_netscape(path):
                 cookies.append(cookie)
     return cookies
 
-# --- 4. BROWSER & SNIFFER LOGIC ---
+# --- 4. BROWSER & SNIFFER LOGIC (Updated to Ignore Ads) ---
 def get_video_stream(url):
     print(f"🕵️ Analyzing: {url}")
     
@@ -103,17 +103,19 @@ def get_video_stream(url):
     service = Service("/usr/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
     
-    m3u8_url = None
+    final_stream_url = None
     title = "video_download"
     screenshot_path = None
     
     try:
+        # 1. Inject Cookies
         driver.get("https://curiositystream.com/login")
         cookies = parse_cookies_netscape(COOKIES_FILE)
         for c in cookies:
             try: driver.add_cookie(c)
             except: pass
             
+        # 2. Load Target URL
         driver.get(url)
         time.sleep(5) 
         
@@ -124,22 +126,37 @@ def get_video_stream(url):
         try: driver.find_element("tag name", "body").click()
         except: pass
         
-        time.sleep(10)
+        time.sleep(15) # Wait longer for ads to finish or main video to start
         
+        # 3. Sniff Logs (And Filter out Ads!)
         logs = driver.get_log('performance')
+        candidates = []
+        
         for entry in logs:
             message = json.loads(entry['message'])['message']
             if message['method'] == 'Network.requestWillBeSent':
                 req_url = message['params']['request']['url']
+                
+                # Check for stream extensions
                 if '.m3u8' in req_url or '.mpd' in req_url:
-                    m3u8_url = req_url
+                    # FILTER: Skip items that look like Ads
+                    lower_url = req_url.lower()
+                    if 'ad.mp4' in lower_url or 'preroll' in lower_url or 'doubleclick' in lower_url:
+                        print(f"⚠️ Ignoring Ad: {req_url[:50]}...")
+                        continue
+                        
+                    candidates.append(req_url)
+        
+        # We take the LAST candidate found, as the main video usually loads last
+        if candidates:
+            final_stream_url = candidates[-1]
         
         try:
             raw_title = driver.title.replace('Watch ', '').replace(' | Curiosity Stream', '').strip()
             title = "".join([c for c in raw_title if c.isalpha() or c.isdigit() or c==' ']).rstrip().replace(" ", "_")
         except: pass
 
-        if not m3u8_url:
+        if not final_stream_url:
             print("❌ Stream not found.")
             screenshot_path = "debug_screenshot.png"
             driver.save_screenshot(screenshot_path)
@@ -149,9 +166,9 @@ def get_video_stream(url):
     finally:
         driver.quit()
         
-    return m3u8_url, title, screenshot_path
+    return final_stream_url, title, screenshot_path
 
-# --- 5. QUEUE WORKER (Fixed for Older FFmpeg) ---
+# --- 5. QUEUE WORKER (Updated to Fix "Overlong Headers") ---
 async def queue_worker(application):
     print("👷 Worker started...")
     while True:
@@ -171,29 +188,20 @@ async def queue_worker(application):
             else:
                 filename = f"{title}.mp4"
                 
-                # --- FIX: Manually Build Cookie Header ---
-                # We read the file and convert it to a string: "name=value; name2=value2"
-                cookies = parse_cookies_netscape(COOKIES_FILE)
-                cookie_header = ""
-                if cookies:
-                    # Create the formatted string
-                    cookie_list = [f"{c['name']}={c['value']}" for c in cookies]
-                    cookie_str = "; ".join(cookie_list)
-                    # Add to header variable
-                    cookie_header = f"Cookie: {cookie_str}"
-
+                # --- FIX: Remove Cookie Header from FFmpeg ---
+                # The video URL usually has a token built-in (e.g. ?token=xyz).
+                # Sending the massive cookie list causes "Overlong headers" crash.
+                # We ONLY send the User-Agent now.
+                
                 ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
                 
-                # We pass the cookies via -headers instead of -cookies_file
-                # Note: The \r\n is important for headers in FFmpeg
                 cmd = (
                     f'ffmpeg -user_agent "{ua}" '
-                    f'-headers "{cookie_header}\r\n" '
                     f'-i "{stream_link}" '
                     f'-c copy -bsf:a aac_adtstoasc "{filename}" '
                     f'-y -hide_banner -loglevel error'
                 )
-                # ----------------------------------------
+                # ----------------------------------------------
                 
                 await application.bot.send_message(chat_id, f"⬇️ Found Stream. Downloading...", parse_mode='Markdown')
                 
@@ -209,7 +217,7 @@ async def queue_worker(application):
                         await application.bot.send_message(chat_id, "❌ Upload Failed (Check Logs).")
                     os.remove(filename)
                 else:
-                    await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed (Access Denied).")
+                    await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed.")
                 
         except Exception as e:
             await application.bot.send_message(chat_id, f"Error: {e}")
