@@ -1,10 +1,11 @@
 FROM python:3.9-slim
 
-# 1. Install Chrome and basic tools
+# 1. Install Chrome, FFmpeg, and system tools
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     unzip \
+    ffmpeg \
     chromium \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
