@@ -89,7 +89,7 @@ def parse_cookies_netscape(path):
                 cookies.append(cookie)
     return cookies
 
-# --- 4. BROWSER & SNIFFER LOGIC (Updated to Ignore Ads) ---
+# --- 4. BROWSER & SNIFFER LOGIC (Hardened Ad Filter) ---
 def get_video_stream(url):
     print(f"🕵️ Analyzing: {url}")
     
@@ -126,31 +126,35 @@ def get_video_stream(url):
         try: driver.find_element("tag name", "body").click()
         except: pass
         
-        time.sleep(15) # Wait longer for ads to finish or main video to start
+        time.sleep(15) 
         
-        # 3. Sniff Logs (And Filter out Ads!)
+        # 3. Sniff Logs
         logs = driver.get_log('performance')
         candidates = []
         
+        print("🔍 Scanning network logs...")
         for entry in logs:
             message = json.loads(entry['message'])['message']
             if message['method'] == 'Network.requestWillBeSent':
                 req_url = message['params']['request']['url']
                 
-                # Check for stream extensions
                 if '.m3u8' in req_url or '.mpd' in req_url:
-                    # FILTER: Skip items that look like Ads
                     lower_url = req_url.lower()
-                    if 'ad.mp4' in lower_url or 'preroll' in lower_url or 'doubleclick' in lower_url:
-                        print(f"⚠️ Ignoring Ad: {req_url[:50]}...")
+                    
+                    # --- STRICT AD FILTER ---
+                    if any(x in lower_url for x in ['ad.mp4', 'preroll', 'doubleclick', 'b-cdn', 'promo']):
+                        print(f"⚠️ Ignored Ad/Promo: {req_url[:60]}...")
                         continue
-                        
+                    
+                    # Prioritize "master" or "playlist" files if possible
                     candidates.append(req_url)
         
-        # We take the LAST candidate found, as the main video usually loads last
+        # Smart Selection: Pick the last one (usually the main feature)
         if candidates:
+            print(f"✅ Found {len(candidates)} valid streams. Picking the last one.")
             final_stream_url = candidates[-1]
         
+        # 4. Get Title
         try:
             raw_title = driver.title.replace('Watch ', '').replace(' | Curiosity Stream', '').strip()
             title = "".join([c for c in raw_title if c.isalpha() or c.isdigit() or c==' ']).rstrip().replace(" ", "_")
