@@ -88,17 +88,17 @@ def parse_cookies_netscape(path):
                 cookies.append(cookie)
     return cookies
 
-# --- 4. BROWSER & SNIFFER LOGIC ---
+# --- 4. BROWSER & SNIFFER LOGIC (Updated) ---
 def get_video_stream(url):
     """Sync function to Sniff Network Logs using Selenium"""
     print(f"🕵️ Analyzing: {url}")
     
-    # Chrome Options for Render
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # CRITICAL: Enable Performance Logging (replacing Colab logic)
+    # NEW: Add User Agent to look like a real Windows PC
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
     options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
     
     service = Service("/usr/bin/chromedriver")
@@ -106,19 +106,21 @@ def get_video_stream(url):
     
     m3u8_url = None
     title = "video_download"
+    screenshot_path = None
     
     try:
         # 1. Inject Cookies
-        driver.get("https://curiositystream.com/login") # Dummy load to set domain
+        driver.get("https://curiositystream.com/login")
         cookies = parse_cookies_netscape(COOKIES_FILE)
-        print(f"🍪 Injecting {len(cookies)} cookies...")
+        
+        # Add cookies to driver
         for c in cookies:
             try: driver.add_cookie(c)
             except: pass
             
         # 2. Load Target URL
         driver.get(url)
-        time.sleep(15) # Wait for network requests
+        time.sleep(15) # Wait for video to trigger
         
         # 3. Sniff Logs
         logs = driver.get_log('performance')
@@ -128,24 +130,28 @@ def get_video_stream(url):
                 req_url = message['params']['request']['url']
                 if '.m3u8' in req_url or '.mpd' in req_url:
                     m3u8_url = req_url
-                    # Don't break; get the last one usually
         
         # 4. Get Title
         try:
             raw_title = driver.title.replace('Watch ', '').replace(' | Curiosity Stream', '').strip()
-            # Clean filename
             title = "".join([c for c in raw_title if c.isalpha() or c.isdigit() or c==' ']).rstrip().replace(" ", "_")
         except:
             pass
+
+        # 5. DEBUG: Take Screenshot if failed
+        if not m3u8_url:
+            print("❌ Stream not found. Taking screenshot...")
+            screenshot_path = "debug_screenshot.png"
+            driver.save_screenshot(screenshot_path)
 
     except Exception as e:
         print(f"Browser Error: {e}")
     finally:
         driver.quit()
         
-    return m3u8_url, title
+    return m3u8_url, title, screenshot_path
 
-# --- 5. QUEUE WORKER ---
+# --- 5. QUEUE WORKER (Updated) ---
 async def queue_worker(application):
     print("👷 Worker started...")
     while True:
@@ -153,15 +159,20 @@ async def queue_worker(application):
         try:
             await application.bot.send_message(chat_id, f"🔄 **Processing:**\n{url}", parse_mode='Markdown')
             
-            # 1. Find Stream
-            stream_link, title = await asyncio.to_thread(get_video_stream, url)
+            # 1. Find Stream (Now returns screenshot_path too)
+            stream_link, title, debug_img = await asyncio.to_thread(get_video_stream, url)
             
             if not stream_link:
-                await application.bot.send_message(chat_id, "❌ Failed. Could not find stream (Check cookies.txt).")
+                msg = "❌ Failed. Could not find stream.\n\n👇 **See attached screenshot to know why:**"
+                await application.bot.send_message(chat_id, msg)
+                
+                # Send the screenshot to Telegram so you can debug
+                if debug_img and os.path.exists(debug_img):
+                    await application.bot.send_photo(chat_id=chat_id, photo=open(debug_img, 'rb'))
+                    os.remove(debug_img)
             else:
                 # 2. Download with FFmpeg
                 filename = f"{title}.mp4"
-                # Using the exact FFmpeg flags from your Colab script
                 cmd = f'ffmpeg -user_agent "Mozilla/5.0" -i "{stream_link}" -c copy -bsf:a aac_adtstoasc "{filename}" -y -hide_banner -loglevel error'
                 
                 await application.bot.send_message(chat_id, f"⬇️ Found Stream. Downloading: `{title}`...", parse_mode='Markdown')
@@ -178,7 +189,6 @@ async def queue_worker(application):
                     else:
                         await application.bot.send_message(chat_id, "❌ Upload Failed (Check Creds).")
                     
-                    # 4. Cleanup (Crucial on Render)
                     os.remove(filename)
                 else:
                     await application.bot.send_message(chat_id, "❌ FFmpeg Download Failed.")
@@ -187,7 +197,6 @@ async def queue_worker(application):
             await application.bot.send_message(chat_id, f"Error: {e}")
         finally:
             download_queue.task_done()
-
 # --- 6. TELEGRAM HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
